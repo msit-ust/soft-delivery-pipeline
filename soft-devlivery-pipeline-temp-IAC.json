@@ -1,0 +1,308 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "CFN Template: CI/CD pipeline using GitHub and AWS CodeBuild",
+    "Parameters": {
+      "GitHubOwner": {
+        "Type": "String",
+        "Description": "Owner of the GitHub repository."
+      },
+      "GitHubRepo": {
+        "Type": "String",
+        "Description": "Name of the GitHub repository."
+      },
+      "GitHubBranch": {
+        "Type": "String",
+        "Default": "main",
+        "Description": "Branch to use from GitHub repository."
+      },
+      "GitHubToken": {
+        "Type": "String",
+        "NoEcho": true,
+        "Description": "Personal access token for GitHub OAuth."
+      }
+    },
+    "Resources": {
+      "AppArtifactBucket": {
+        "Type": "AWS::S3::Bucket",
+        "Properties": {
+          "BucketName": {
+            "Fn::Sub": "${AWS::StackName}-pipeline-artifacts"
+          },
+          "VersioningConfiguration": {
+            "Status": "Enabled"
+          },
+          "BucketEncryption": {
+            "ServerSideEncryptionConfiguration": [
+              {
+                "ServerSideEncryptionByDefault": {
+                  "SSEAlgorithm": "AES256"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "BuildProjectRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "Path": "/",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "codebuild.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+          ],
+          "Policies": [
+            {
+              "PolicyName": "CodeBuildLoggingS3Access",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "logs:CreateLogGroup",
+                      "logs:CreateLogStream",
+                      "logs:PutLogEvents"
+                    ],
+                    "Resource": "*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "s3:GetObject",
+                      "s3:PutObject"
+                    ],
+                    "Resource": [
+                      {
+                        "Fn::Join": [
+                          "",
+                          [
+                            {
+                              "Fn::GetAtt": [
+                                "AppArtifactBucket",
+                                "Arn"
+                              ]
+                            },
+                            "/*"
+                          ]
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "PipelineServiceRole": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "Path": "/service-role/",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "codepipeline.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "Policies": [
+            {
+              "PolicyName": "CodePipelineFullAccess",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "s3:PutObject",
+                      "s3:GetObject",
+                      "s3:GetBucketAcl",
+                      "s3:GetBucketLocation"
+                    ],
+                    "Resource": [
+                      {
+                        "Fn::GetAtt": [
+                          "AppArtifactBucket",
+                          "Arn"
+                        ]
+                      },
+                      {
+                        "Fn::Join": [
+                          "",
+                          [
+                            {
+                              "Fn::GetAtt": [
+                                "AppArtifactBucket",
+                                "Arn"
+                              ]
+                            },
+                            "/*"
+                          ]
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "codebuild:StartBuild",
+                      "codebuild:BatchGetBuilds"
+                    ],
+                    "Resource": [
+                      {
+                        "Fn::GetAtt": [
+                          "BuildProject",
+                          "Arn"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "BuildProject": {
+        "Type": "AWS::CodeBuild::Project",
+        "Properties": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-builder"
+          },
+          "ServiceRole": {
+            "Fn::GetAtt": ["BuildProjectRole", "Arn"]
+          },
+          "Artifacts": {
+            "Type": "CODEPIPELINE"
+          },
+          "Environment": {
+            "ComputeType": "BUILD_GENERAL1_SMALL",
+            "Image": "aws/codebuild/amazonlinux2-x86_64-standard:3.0",
+            "Type": "LINUX_CONTAINER",
+            "PrivilegedMode": false
+          },
+          "Source": {
+            "Type": "CODEPIPELINE",
+            "BuildSpec": "buildspec.yml"
+          },
+          "LogsConfig": {
+            "CloudWatchLogs": {
+              "Status": "ENABLED"
+            }
+          },
+          "Description": "Build process for application"
+        }
+      },
+      "AppPipeline": {
+        "Type": "AWS::CodePipeline::Pipeline",
+        "Properties": {
+          "RoleArn": {
+            "Fn::GetAtt": ["PipelineServiceRole", "Arn"]
+          },
+          "ArtifactStore": {
+            "Type": "S3",
+            "Location": {
+              "Ref": "AppArtifactBucket"
+            }
+          },
+          "Stages": [
+            {
+              "Name": "SourceStage",
+              "Actions": [
+                {
+                  "Name": "FetchFromGitHub",
+                  "ActionTypeId": {
+                    "Category": "Source",
+                    "Owner": "ThirdParty",
+                    "Provider": "GitHub",
+                    "Version": "1"
+                  },
+                  "OutputArtifacts": [
+                    {
+                      "Name": "SourceArtifact"
+                    }
+                  ],
+                  "Configuration": {
+                    "Owner": {
+                      "Ref": "GitHubOwner"
+                    },
+                    "Repo": {
+                      "Ref": "GitHubRepo"
+                    },
+                    "Branch": {
+                      "Ref": "GitHubBranch"
+                    },
+                    "OAuthToken": {
+                      "Ref": "GitHubToken"
+                    }
+                  },
+                  "RunOrder": 1
+                }
+              ]
+            },
+            {
+              "Name": "BuildStage",
+              "Actions": [
+                {
+                  "Name": "RunBuild",
+                  "ActionTypeId": {
+                    "Category": "Build",
+                    "Owner": "AWS",
+                    "Provider": "CodeBuild",
+                    "Version": "1"
+                  },
+                  "InputArtifacts": [
+                    {
+                      "Name": "SourceArtifact"
+                    }
+                  ],
+                  "OutputArtifacts": [
+                    {
+                      "Name": "BuildArtifact"
+                    }
+                  ],
+                  "Configuration": {
+                    "ProjectName": {
+                      "Ref": "BuildProject"
+                    }
+                  },
+                  "RunOrder": 1
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "Outputs": {
+      "PipelineConsoleLink": {
+        "Description": "Navigate to pipeline dashboard",
+        "Value": {
+          "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${AppPipeline}/view?region=${AWS::Region}"
+        }
+      },
+      "ArtifactsBucket": {
+        "Description": "S3 bucket name storing pipeline artifacts",
+        "Value": {
+          "Ref": "AppArtifactBucket"
+        }
+      }
+    }
+  }
+  
